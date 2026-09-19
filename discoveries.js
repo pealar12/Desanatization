@@ -20,6 +20,12 @@
 // structure degrades to "no new targets" with a warning, never a crash.
 // ============================================================================
 
+import { safeFetch } from './net-safety.js';
+
+/** Origins extracted from a single scraped page/feed, capped so one stuffed
+ *  or malicious response can never inflate the target pool unbounded. */
+const MAX_ORIGINS_PER_SOURCE = 100;
+
 /**
  * Shared fetch-with-timeout helper. Never throws; returns status + body.
  *
@@ -29,7 +35,7 @@
  */
 async function fetchSafe(url, options = {}) {
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(10_000), ...options });
+    const response = await safeFetch(url, { signal: AbortSignal.timeout(10_000), ...options });
     return {
       status: response.status,
       headers: response.headers,
@@ -50,6 +56,7 @@ async function fetchSafe(url, options = {}) {
 export function collapseToOrigins(urls) {
   const origins = new Set();
   for (const url of urls) {
+    if (origins.size >= MAX_ORIGINS_PER_SOURCE) break;
     if (!url || typeof url !== 'string' || !/^https?:\/\//.test(url)) continue;
     try {
       const parsed = new URL(url);
@@ -276,37 +283,16 @@ export async function discoverFromX402Docs() {
 }
 
 // ---------------------------------------------------------------------------
-// AI Agent Directory Discovery (A2A-focused agent galleries)
-// ---------------------------------------------------------------------------
-
-/**
- * Scrape known AI agent directories and galleries for services that may
- * support x402 payments. Targets agent marketplaces and framework galleries.
- *
- * @returns {Promise<string[]>} Origin URLs from agent directories
- */
-export async function discoverFromAgentDirectories() {
-  const sources = [
-    'https://huggingface.co/models?sort=downloads',
-    'https://deepseek.com',
-    'https://www.perplexity.ai',
-    'https://claude.ai',
-    'https://chat.openai.com',
-  ];
-  const all = [];
-  for (const src of sources) {
-    const res = await fetchSafe(src, {
-      headers: { 'User-Agent': 'desanatization-discoveries/1.0 (x402 B2B outreach)' },
-    });
-    if (res.ok) {
-      for (const origin of collapseToOrigins(extractUrls(res.body))) all.push(origin);
-    }
-  }
-  return all;
-}
-
-// ---------------------------------------------------------------------------
 // Composite discovery: run all sources and merge results
+//
+// NOTE: an earlier version of this module also scraped generic consumer AI
+// product homepages (huggingface.co, chat.openai.com, claude.ai, ...) for
+// arbitrary outbound links and fed them into the outreach pool. Those sites
+// are not agent directories and never opted into receiving automated x402
+// pitches, so that source was removed — every remaining source here is
+// either a real service registry (CDP Bazaar, GitHub, agent galleries) or
+// requires the target to positively self-identify as an x402/agent peer
+// before growth.js will ever pitch it (see probeAndPitch's consent gate).
 // ---------------------------------------------------------------------------
 
 /**
@@ -320,7 +306,6 @@ export async function discoverFromAgentDirectories() {
  * @param {boolean} [options.googleCloud=true] - Run Google Cloud Agent Gallery discovery
  * @param {boolean} [options.salesforce=true] - Run Salesforce AgentExchange discovery
  * @param {boolean} [options.bazaar=true] - Run CDP x402 Bazaar discovery
- * @param {boolean} [options.agentDirs=true] - Run AI agent directory discovery
  * @param {boolean} [options.x402docs=true] - Run x402 docs discovery
  * @param {Function} [options.log] - Logger for warnings (defaults to console.warn)
  * @returns {Promise<string[]>} Deduplicated origin URLs from all sources
@@ -331,7 +316,6 @@ export async function discoverAll({
   googleCloud = true,
   salesforce = true,
   bazaar = true,
-  agentDirs = true,
   x402docs = true,
   log = console.warn,
 } = {}) {
@@ -377,15 +361,6 @@ export async function discoverAll({
     tasks.push(
       discoverFromX402Docs().catch((error) => {
         log(`x402 docs discovery error: ${error.message}`);
-        return [];
-      }),
-    );
-  }
-
-  if (agentDirs) {
-    tasks.push(
-      discoverFromAgentDirectories().catch((error) => {
-        log(`Agent directory discovery error: ${error.message}`);
         return [];
       }),
     );

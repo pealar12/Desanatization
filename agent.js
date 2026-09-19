@@ -17,19 +17,22 @@
 import { sanitizeText } from './sanitize.js';
 import fsSync from 'node:fs';
 import { dirname } from 'node:path';
+import { safeFetch } from './net-safety.js';
 
 export const MAX_STEPS_CAP = 16;
 
 /**
  * Fetch with a timeout, never throwing (GET only — the agent never sends
- * writes on its own initiative).
+ * writes on its own initiative). Every URL, including one supplied directly
+ * by the caller of `POST /api/agent/task`, is validated against internal and
+ * cloud-metadata address ranges before the request is made.
  *
  * @param {string} url - Absolute URL
  * @returns {Promise<{status: number, body: string, ok: boolean}>}
  */
 async function getSafe(url) {
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    const response = await safeFetch(url, { signal: AbortSignal.timeout(10_000) });
     return { status: response.status, body: (await response.text()).slice(0, 4000), ok: response.ok };
   } catch (error) {
     return { status: 0, body: String(error?.message ?? error), ok: false };
@@ -113,7 +116,7 @@ export const TOOLS = new Map([
         },
         offer: offer ?? 'PII sanitization for AI agents over x402 (USDC on Base). Free trial, $0.001 per full job. Resell with your own ?ref= tag and earn 10% revenue share.',
       };
-      for (const surface of ['/api/outreach', '/api/pitch', '/contact']) {
+      for (const surface of ['/api/outreach', '/api/pitch']) {
         const attempt = await getSafeWithBody(`${url.replace(/\/+$/, '')}${surface}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -148,7 +151,7 @@ export const TOOLS = new Map([
  */
 async function getSafeWithBody(url, options = {}) {
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(10_000), ...options });
+    const response = await safeFetch(url, { signal: AbortSignal.timeout(10_000), ...options });
     return { status: response.status, body: (await response.text()).slice(0, 2000), ok: response.ok };
   } catch (error) {
     return { status: 0, body: String(error?.message ?? error), ok: false };

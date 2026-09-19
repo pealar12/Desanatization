@@ -66,13 +66,16 @@ console.log(contextSnapshot(guard));
 
 ## 4. Integration with the x402 server
 
-When working in this repository, the agent-guard module is wired into:
-- **`growth.js`** — every growth cycle is logged; loop/hallucination detection
-  prevents the engine from hammering non-responsive peers.
-- **`agent.js`** — every task agent step is tracked; the supervisor uses guard
-  reports to detect degraded behavior and escalate.
-- **`index.js`** — the bootstrap process calls `guard.finish()` on shutdown
-  to persist the session log.
+`agent-guard.js` is a standalone loop/hallucination-tracking utility with its
+own tests-adjacent usage (see its exports), but it is **not currently wired
+into the running server** — `growth.js`, `agent.js` and `index.js` do not
+import it. The loop/cycle detection those modules actually rely on
+(`GROWTH_MAX_PER_CYCLE`, the task agent's step budget, backoff on
+unresponsive peers) is implemented directly in each module. Treat
+`agent-guard.js` as available for a coding agent's own session hygiene (per
+sections 1–3 above), not as something already protecting production traffic.
+If you wire it into `growth.js`/`agent.js`/`index.js`, update this section to
+match and add test coverage under `test/`.
 
 ## 5. Debug-aware workflow
 

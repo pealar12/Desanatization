@@ -5,8 +5,10 @@
 // x402 middleware) on an ephemeral port without starting a process.
 // ============================================================================
 
+import { timingSafeEqual } from 'node:crypto';
 import express from 'express';
 import { describeConfig } from './config.js';
+import { safeFetch } from './net-safety.js';
 import { createGrowthEngine } from './growth.js';
 import { discoverAll } from './discoveries.js';
 import { createTaskAgent } from './agent.js';
@@ -47,6 +49,32 @@ import {
 
 const STARTED_AT = Date.now();
 
+/** Cap on a proxied peer's declared response size (Content-Length), so a huge
+ *  or hostile peer response can never be used to exhaust server memory. */
+const MAX_PROXY_RESPONSE_BYTES = 1_000_000;
+
+/**
+ * Constant-time string comparison, tolerant of length mismatches (which
+ * `crypto.timingSafeEqual` itself throws on). Used for bearer-token checks so
+ * a network timing side-channel can never help narrow down the token.
+ *
+ * @param {unknown} received - Value from an untrusted request header
+ * @param {string} expected - The known-good value to compare against
+ * @returns {boolean} True when the two are exactly equal
+ */
+function safeTokenMatch(received, expected) {
+  const receivedBuf = Buffer.from(String(received ?? ''));
+  const expectedBuf = Buffer.from(expected);
+  if (receivedBuf.length !== expectedBuf.length) {
+    // Still do a constant-time compare against a same-length buffer so the
+    // early return above doesn't itself leak length via timing beyond what
+    // an attacker could already observe from response size.
+    timingSafeEqual(expectedBuf, expectedBuf);
+    return false;
+  }
+  return timingSafeEqual(receivedBuf, expectedBuf);
+}
+
 /**
  * Optional bearer-token guard for the metrics endpoint.
  *
@@ -56,7 +84,7 @@ const STARTED_AT = Date.now();
 function requireMetricsToken(config) {
   return (req, res, next) => {
     if (!config.metricsToken) return next();
-    if (req.headers.authorization === `Bearer ${config.metricsToken}`) return next();
+    if (safeTokenMatch(req.headers.authorization, `Bearer ${config.metricsToken}`)) return next();
     return res.status(401).json({
       error: 'Metrics are protected. Send Authorization: Bearer <METRICS_TOKEN>.',
       requestId: req.id,
@@ -128,6 +156,19 @@ export function createApp({ config, logger, x402 }) {
   app.use(handleBodyParseErrors);
   app.use(extractPaymentHeader);
   app.use(trackRequests(logger));
+
+  // Global rate limiting — mounted before any route so it actually covers
+  // every one of them, including unpaid 402 scraping and the free trial.
+  // (A route handler that responds without calling next() would otherwise
+  // never reach a limiter mounted after it — Express matches in registration
+  // order.) Health checks are skipped so an orchestrator probe can never be
+  // throttled.
+  const limiter = createRateLimiter({
+    windowMs: config.rateLimit.windowMs,
+    maxRequests: config.rateLimit.maxRequests,
+    skip: (req) => req.path === '/health' || req.path === '/ready',
+  });
+  app.use(limiter);
 
   // --- Revenue & failure telemetry ----------------------------------------
   // Wired onto the real x402 lifecycle so settled payments are observable
@@ -333,7 +374,7 @@ export function createApp({ config, logger, x402 }) {
     }
     growthEngine.recordInbound(pitch, req.ip);
     trackFunnel('inboundPitch');
-    logger.info(`Inbound pitch from ${String(pitch.from).slice(0, 120)}`);
+    logger.info(`Inbound pitch from ${String(pitch.from).replace(/[\r\n\t\x00-\x1f\x7f]+/g, ' ').slice(0, 120)}`);
     res.status(202).json({
       accepted: true,
       note: 'Pitch recorded. Our storefront: see llms.txt and openapi.json.',
@@ -437,15 +478,6 @@ app.get('/.well-known/catalog.json', (req, res) => {
     });
   });
 
-// --- Global rate limiting ----------------------------------------------
-  // Protects every route, including unpaid 402 scraping. Health checks are
-  // skipped so an orchestrator probe can never be throttled.
-  const limiter = createRateLimiter({
-    windowMs: config.rateLimit.windowMs,
-    maxRequests: config.rateLimit.maxRequests,
-    skip: (req) => req.path === '/health' || req.path === '/ready',
-  });
-  app.use(limiter);
 
   // --- Paid endpoint ------------------------------------------------------
   // NOTE: the x402 middleware must be mounted at the ROOT. Mounting it under
@@ -569,12 +601,21 @@ app.get('/.well-known/catalog.json', (req, res) => {
     logger.debug(`A2A proxy: ${req.x402?.paymentHeaderVersion ?? '?'}v client -> ${targetUrl}`);
 
     try {
-      const response = await fetch(targetUrl, {
+      const response = await safeFetch(targetUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
         signal: AbortSignal.timeout(15_000),
       });
+      const contentLength = Number(response.headers.get('content-length') ?? '0');
+      if (contentLength > MAX_PROXY_RESPONSE_BYTES) {
+        return res.status(502).json({
+          error: 'Proxy target response too large',
+          targetUrl,
+          requestId: req.id,
+          timestamp: new Date().toISOString(),
+        });
+      }
       const data = await response.json().catch(() => ({}));
       res.json({
         success: response.ok,

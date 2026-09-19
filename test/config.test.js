@@ -101,8 +101,16 @@ describe('config', () => {
   });
 
   test('strictStartup defaults on in production and off elsewhere', () => {
-    assert.equal(loadConfig({ ...baseEnv, NODE_ENV: 'production' }).strictStartup, true);
+    assert.equal(
+      loadConfig({ ...baseEnv, NODE_ENV: 'production', METRICS_TOKEN: 'prod-secret' }).strictStartup,
+      true,
+    );
     assert.equal(loadConfig({ ...baseEnv, NODE_ENV: 'development' }).strictStartup, false);
+  });
+
+  test('production requires METRICS_TOKEN', () => {
+    const error = captureThrow(() => loadConfig({ ...baseEnv, NODE_ENV: 'production' }));
+    assert.match(error.message, /METRICS_TOKEN is required/);
   });
 
   test('production refuses a localhost facilitator', () => {

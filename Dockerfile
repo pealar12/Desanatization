@@ -16,7 +16,7 @@ WORKDIR /app
 
 COPY --from=dependencies /app/node_modules ./node_modules
 COPY package.json ./
-COPY index.js app.js config.js x402.js logger.js sanitize.js growth.js agent.js cdp-auth.js notifications.js supervisor.js discoveries.js a2a-commerce.js ./
+COPY index.js app.js config.js x402.js logger.js sanitize.js growth.js agent.js cdp-auth.js notifications.js supervisor.js discoveries.js a2a-commerce.js net-safety.js ./
 
 COPY middleware ./middleware
 

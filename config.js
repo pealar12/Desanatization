@@ -356,7 +356,11 @@ export function loadConfig(env = process.env) {
     // (fail the deploy loudly instead of serving traffic that can never be paid).
     strictStartup: readBool(env.STRICT_STARTUP, 'STRICT_STARTUP', problems, isProduction),
 
-    // Optional bearer token protecting the /metrics endpoint.
+    // Bearer token protecting /api/metrics, /api/revenue, /api/health/deep,
+    // /api/insights, /api/growth, /api/notifications and the task agent
+    // endpoints. Required in production: several of those (notably the task
+    // agent's http_fetch tool) are outbound-request primitives that must
+    // never be reachable by an unauthenticated caller.
     metricsToken: String(env.METRICS_TOKEN || '').trim() || undefined,
 
     rateLimit: {
@@ -369,15 +373,21 @@ export function loadConfig(env = process.env) {
     growth: {
       enabled: readBool(env.GROWTH_ENABLED, 'GROWTH_ENABLED', problems, isProduction),
       targets: env.GROWTH_TARGETS,
-      // Seed targets: well-known x402 agent networks, service aggregators,
-      // and frameworks that embed or integrate x402. The engine discovers more
-      // peers from the CDP Bazaar + GitHub + agent galleries every cycle, but
-      // starting with a warm list gets the first pitches out within minutes.
-      // Prioritized: actual x402 services > frameworks with AI agent programs >
-      // major API providers that may embed x402 in their agent surfaces.
+      // Seed targets: known x402 services actually running on Base mainnet —
+      // i.e. peers that, by running the x402 protocol at all, have already
+      // opted into machine-to-machine payment discovery. The engine discovers
+      // more from the CDP Bazaar + GitHub every cycle, but a warm list gets
+      // the first pitches out within minutes.
+      //
+      // Deliberately NOT included here: generic AI-provider/framework/SaaS
+      // domains (model APIs, LangChain, Zapier, Cloudflare, Hugging Face,
+      // consumer chat products, ...). None of those are x402 peers or have
+      // consented to receive automated outreach, and probeAndPitch() will not
+      // attempt a pitch against any target that lacks a positive x402/agent
+      // signal — so listing them here would only produce unsolicited spam at
+      // real companies' contact/API surfaces, never a sale.
       seedTargets: isProduction
         ? JSON.stringify([
-            // Known x402 services (actual pay-to-use agents on Base mainnet)
             { url: 'https://x402.ottoai.services', kind: 'known-peer' },
             { url: 'https://api.onesource.io', kind: 'known-peer' },
             { url: 'https://stableenrich.dev', kind: 'known-peer' },
@@ -388,32 +398,6 @@ export function loadConfig(env = process.env) {
             { url: 'https://stableupload.dev', kind: 'known-peer' },
             { url: 'https://laso.finance', kind: 'known-peer' },
             { url: 'https://api.bitrefill.com', kind: 'known-peer' },
-            // AI agent frameworks with x402 integration paths
-            { url: 'https://agno.com', kind: 'framework' },
-            { url: 'https://langchain.com', kind: 'framework' },
-            { url: 'https://openrouter.ai', kind: 'provider' },
-            { url: 'https://api.anthropic.com', kind: 'provider' },
-            { url: 'https://api.openai.com', kind: 'provider' },
-            { url: 'https://agents.google.com', kind: 'framework' },
-            { url: 'https://www.anthropic.com', kind: 'provider' },
-            { url: 'https://docs.anthropic.com', kind: 'provider' },
-            { url: 'https://sdk.vercel.ai', kind: 'framework' },
-            { url: 'https://www.langchain.com', kind: 'framework' },
-            { url: 'https://python.langchain.com', kind: 'framework' },
-            { url: 'https://api.together.ai', kind: 'provider' },
-            { url: 'https://api.groq.com', kind: 'provider' },
-            { url: 'https://api.fireworks.ai', kind: 'provider' },
-            { url: 'https://api.cohere.ai', kind: 'provider' },
-            { url: 'https://api.replicate.com', kind: 'provider' },
-            { url: 'https://api.deepseek.com', kind: 'provider' },
-            { url: 'https://openai.com', kind: 'provider' },
-            { url: 'https://developers.cloudflare.com', kind: 'framework' },
-            { url: 'https://n8n.io', kind: 'framework' },
-            { url: 'https://www.make.com', kind: 'framework' },
-            { url: 'https://zapier.com', kind: 'framework' },
-            { url: 'https://huggingface.co', kind: 'provider' },
-            { url: 'https://claude.ai', kind: 'provider' },
-            { url: 'https://chat.openai.com', kind: 'provider' },
           ])
         : undefined,
       bazaarDiscovery: isProduction,
@@ -480,6 +464,19 @@ export function loadConfig(env = process.env) {
   if (config.notifications.transport === 'smtp' && (!config.notifications.smtpUrl || !config.notifications.from || !config.notifications.to)) {
     problems.push(
       'NOTIFICATION_TRANSPORT=smtp requires NOTIFICATION_SMTP_URL, NOTIFICATION_FROM and NOTIFICATION_TO',
+    );
+  }
+
+  // Several token-guarded endpoints are outbound-request primitives (notably
+  // the task agent's http_fetch tool, and /api/growth which reveals the
+  // outreach target list) — they must never be reachable by an anonymous
+  // caller in production.
+  if (config.isProduction && !config.metricsToken) {
+    problems.push(
+      'METRICS_TOKEN is required when NODE_ENV=production — it protects /api/metrics, /api/revenue, ' +
+        '/api/health/deep, /api/insights, /api/growth, /api/notifications and the task agent endpoints ' +
+        '(one of which can make outbound HTTP requests on request) from anonymous callers. ' +
+        'Set METRICS_TOKEN to a random 32+ character value.',
     );
   }
 

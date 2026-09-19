@@ -109,6 +109,20 @@ describe('http endpoints', () => {
 
   test('malformed JSON bodies are rejected with 400', async () => {
     const server = await startTestServer();
+    try {
+      const response = await server.fetch('/api/resource', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{"broken":',
+      });
+      assert.equal(response.status, 400);
+      assert.equal((await response.json()).error, 'Malformed JSON body');
+    } finally {
+      await server.close();
+    }
+  });
+});
+
 describe('response headers', () => {
   test('applies hardening headers and never advertises Express', async () => {
     const server = await startTestServer();
@@ -193,19 +207,6 @@ describe('cors', () => {
       assert.equal(preflight.headers.get('access-control-allow-origin'), 'http://localhost:5173');
       assert.match(preflight.headers.get('access-control-allow-headers'), /PAYMENT-SIGNATURE/);
       assert.match(preflight.headers.get('access-control-allow-methods'), /GET/);
-    } finally {
-      await server.close();
-    }
-  });
-});
-    try {
-      const response = await server.fetch('/api/resource', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: '{"broken":',
-      });
-      assert.equal(response.status, 400);
-      assert.equal((await response.json()).error, 'Malformed JSON body');
     } finally {
       await server.close();
     }

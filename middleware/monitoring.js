@@ -13,6 +13,31 @@ const logger = createLogger('monitoring');
 /** Rolling retention for latency samples. */
 const MAX_SAMPLES = 1000;
 
+// Several of the maps below are keyed by attacker-influenced strings reachable
+// from unauthenticated routes (`trackFunnel`/`trackReferral` are called from
+// the free POST /api/sanitize/trial on every request, keyed by the caller's
+// own ?ref= value). Without a cap, hammering that endpoint with a fresh
+// referral id each time grows these objects — and the process's memory —
+// without bound. Once the cap is hit, further *distinct* keys are dropped;
+// existing keys keep counting normally.
+const MAX_TRACKED_KEYS = 2000;
+
+/**
+ * Increment a counter in a plain-object store, refusing to introduce a new
+ * key once the store is at the tracked-key cap.
+ *
+ * @param {Record<string, number>} store - Counter map
+ * @param {string} key - Key to increment
+ * @param {number} [amount] - Amount to add
+ * @returns {void}
+ */
+function boundedIncrement(store, key, amount = 1) {
+  if (!(key in store)) {
+    if (Object.keys(store).length >= MAX_TRACKED_KEYS) return;
+  }
+  store[key] = (store[key] || 0) + amount;
+}
+
 const metrics = {
   startedAt: Date.now(),
   totalRequests: 0,
@@ -131,10 +156,13 @@ export function trackPayment({ amount, asset = 'unknown', payer, network, transa
   if (metrics.receipts.length > 20) metrics.receipts.length = 20;
   // Retention: the money question is not "did they buy" but "did they return".
   if (payer) {
-    const buyer = metrics.buyers[payer] ?? { purchases: 0, firstAt: new Date().toISOString() };
-    buyer.purchases += 1;
-    buyer.lastAt = new Date().toISOString();
-    metrics.buyers[payer] = buyer;
+    const isNewBuyer = !(payer in metrics.buyers);
+    if (!isNewBuyer || Object.keys(metrics.buyers).length < MAX_TRACKED_KEYS) {
+      const buyer = metrics.buyers[payer] ?? { purchases: 0, firstAt: new Date().toISOString() };
+      buyer.purchases += 1;
+      buyer.lastAt = new Date().toISOString();
+      metrics.buyers[payer] = buyer;
+    }
   }
   logger.info(
     `Payment settled: ${amount} of ${asset} on ${network || 'unknown'} from ${payer || 'unknown'} (tx ${transaction || 'n/a'})`,
@@ -149,7 +177,7 @@ export function trackPayment({ amount, asset = 'unknown', payer, network, transa
  */
 export function trackReferral(ref) {
   if (!ref) return;
-  metrics.referrals[ref] = (metrics.referrals[ref] || 0) + 1;
+  boundedIncrement(metrics.referrals, ref);
   trackFunnel(`ref:${ref}`);
 }
 
@@ -167,8 +195,12 @@ export function creditReferral(ref, amount, asset = '0x833589fCD6eDb6E08f4c7C32D
   const share = BigInt(amount) / 10n; // 10% to the referrer
   if (share === 0n) return;
   const key = `${asset}`;
-  metrics.referralRevenue[key] = String(BigInt(metrics.referralRevenue[key] || '0') + share);
-  metrics.referralCredits[ref] = String(BigInt(metrics.referralCredits[ref] || '0') + share);
+  if (key in metrics.referralRevenue || Object.keys(metrics.referralRevenue).length < MAX_TRACKED_KEYS) {
+    metrics.referralRevenue[key] = String(BigInt(metrics.referralRevenue[key] || '0') + share);
+  }
+  if (ref in metrics.referralCredits || Object.keys(metrics.referralCredits).length < MAX_TRACKED_KEYS) {
+    metrics.referralCredits[ref] = String(BigInt(metrics.referralCredits[ref] || '0') + share);
+  }
   logger.info(`Referral credit: ${share} of ${asset} to ref ${ref}`);
 }
 
@@ -182,7 +214,7 @@ export function creditReferral(ref, amount, asset = '0x833589fCD6eDb6E08f4c7C32D
  */
 export function trackPaymentFailure(reason) {
   const key = String(reason || 'unknown').slice(0, 120);
-  metrics.paymentFailureReasons[key] = (metrics.paymentFailureReasons[key] || 0) + 1;
+  boundedIncrement(metrics.paymentFailureReasons, key);
   logger.warn(`Payment failure: ${key}`);
 }
 
@@ -195,7 +227,7 @@ export function trackPaymentFailure(reason) {
  */
 export function trackFunnel(event) {
   const key = String(event || 'unknown').slice(0, 60);
-  metrics.funnel[key] = (metrics.funnel[key] || 0) + 1;
+  boundedIncrement(metrics.funnel, key);
 }
 
 /**

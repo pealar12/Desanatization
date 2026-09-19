@@ -10,8 +10,8 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js",
-    "test": "node --test",
-    "test:watch": "node --test --watch",
+    "test": "NODE_ENV=test node --test 'test/**/*.js'",
+    "test:watch": "NODE_ENV=test node --test --watch 'test/**/*.js'",
     "client": "node clients/fetch-client.mjs",
     "log:review": "node scripts/log-review.mjs",
     "log:live": "node scripts/log-review.mjs --live",

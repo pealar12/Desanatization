@@ -18,6 +18,15 @@
 import fsSync from 'node:fs';
 import { dirname } from 'node:path';
 import { discoverAll } from './discoveries.js';
+import { safeFetch } from './net-safety.js';
+
+/** Total peers retained across all sources; oldest/lowest-scoring evicted beyond this. */
+const MAX_POOL_SIZE = 500;
+
+/** Strip control characters so an attacker-influenced string can never forge a log line. */
+function sanitizeForLog(value, maxLen = 200) {
+  return String(value ?? '').replace(/[\r\n\t\x00-\x1f\x7f]+/g, ' ').trim().slice(0, maxLen);
+}
 
 const X402_CHALLENGE_HEADER = 'payment-required';
 
@@ -93,7 +102,14 @@ export function mergeDiscovered(existing, feed) {
       responses: 0,
     });
   }
-  return [...byUrl.values()];
+  let merged = [...byUrl.values()];
+  // Bound the pool: a stuffed feed or scraped page can otherwise grow memory
+  // and the persisted state file without limit. Keep the highest-scoring
+  // (i.e. most responsive / most recently proven) entries.
+  if (merged.length > MAX_POOL_SIZE) {
+    merged = merged.sort((a, b) => b.score - a.score).slice(0, MAX_POOL_SIZE);
+  }
+  return merged;
 }
 
 /**
@@ -126,7 +142,7 @@ export function collapseToOrigins(items) {
  */
 export async function fetchSafe(url, init = {}) {
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(10_000), ...init });
+    const response = await safeFetch(url, { signal: AbortSignal.timeout(10_000), ...init });
     return {
       status: response.status,
       headers: response.headers,
@@ -232,11 +248,6 @@ export async function probeAndPitch(target, pitch) {
     Boolean(root.headers.get(X402_CHALLENGE_HEADER)) ||
     root.body.includes('x402');
 
-  // --- AGGRESSIVE MODE (day-of-launch until first sale) ---
-  // Pre-filter check: x402-aware targets get priority outreach, but we no
-  // longer skip non-x402 peers entirely. Every reachable target gets at
-  // least one pitch attempt — the market learns faster when heat=0.
-
   const hasLlms = root.body.includes('llms.txt') || (await fetchSafe(`${target.url}/llms.txt`)).ok;
 
   // Discover A2A endpoint from agent card when available.
@@ -251,22 +262,44 @@ export async function probeAndPitch(target, pitch) {
     } catch {}
   }
 
-  // Full outreach surface list — try every known entry point concurrently.
-  const previousSurface = target.lastSurface;
-  const surfaces = previousSurface
-    ? [previousSurface, '/api/outreach', '/api/pitch', '/contact', '/api/agents', '/api']
-    : ['/api/outreach', '/api/pitch', '/contact', '/api/agents', '/api'];
+  // Consent gate: only pitch a peer that has given a positive, machine-legible
+  // signal it wants agent outreach (an x402 challenge, an advertised
+  // llms.txt, or an agent card). A generic reachable host is not an agent —
+  // pitching it anyway would be unsolicited spam at whatever it actually is
+  // (a marketing site, an unrelated API), which is exactly what this engine
+  // must never become.
+  if (!isX402Peer && !hasLlms && !a2aEndpoint) {
+    updated.responses = target.responses + (root.ok ? 1 : 0);
+    updated.failures = 0;
+    updated.lastResult = 'reachable:no-agent-signal';
+    updated.score = Math.max(0, target.score - 0.2);
+    return updated;
+  }
 
-  // Add A2A endpoint if discovered from agent card.
-  if (a2aEndpoint) surfaces.unshift(a2aEndpoint);
+  // Outreach surface list — machine-oriented endpoints only. Never `/contact`
+  // (a human-facing form) or a bare `/api` (too generic to be a safe target
+  // for an automated JSON pitch) — a peer must expose a dedicated,
+  // machine-readable surface to receive one. Entries here are relative paths;
+  // a discovered agent-card endpoint is already absolute and must not be
+  // concatenated onto target.url like the relative ones. `lastSurface` may be
+  // either shape, carried over verbatim from a previous successful cycle.
+  const previousSurface = target.lastSurface;
+  const relativeSurfaces = ['/api/outreach', '/api/pitch', '/api/agents'];
+  const candidates = [];
+  if (previousSurface) candidates.push(previousSurface);
+  if (a2aEndpoint && a2aEndpoint !== previousSurface) candidates.push(a2aEndpoint);
+  for (const surface of relativeSurfaces) {
+    if (surface !== previousSurface) candidates.push(surface);
+  }
 
   // Serial outreach: try surfaces one at a time and stop at the first win.
   // Firing them all concurrently would emit a burst of requests at a single
   // third-party host; a peer deserves exactly one pitch attempt per cycle.
   let pitched = false;
   let workingSurface = null;
-  for (const surface of surfaces) {
-    const attempt = await fetchSafe(`${target.url}${surface}`, {
+  for (const surface of candidates) {
+    const fullUrl = /^https?:\/\//.test(surface) ? surface : `${target.url}${surface}`;
+    const attempt = await fetchSafe(fullUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(pitch),
@@ -548,7 +581,7 @@ export function createGrowthEngine({
 
     logger.info(
       `Growth cycle ${cycles}: probed ${batch.length}, pitched ${pitched}, pool ${targets.length} ` +
-        `(top: ${ordered[0]?.url ?? 'n/a'})`,
+        `(top: ${sanitizeForLog(ordered[0]?.url) || 'n/a'})`,
     );
     return { cycles, pitched, probed: batch.length, pool: targets.length, effectiveMax };
   }
