@@ -108,7 +108,7 @@ describe('notification transports', () => {
             transport: 'smtp',
             smtpUrl: 'https://api.example/v3/mail/send',
             from: 'you@example.com',
-            to: 'andrew.peal12@gmail.com',
+            to: 'owner@example.com',
           },
         },
         { info() {}, warn() {}, error() {} },
@@ -116,7 +116,7 @@ describe('notification transports', () => {
       const ok = await notifier.notify(NOTIFICATION_EVENT.FIRST_PURCHASE, { message: 'First purchase received' });
       assert.equal(ok, true);
       const email = JSON.parse(received[0].body);
-      assert.equal(email.to, 'andrew.peal12@gmail.com');
+      assert.equal(email.to, 'owner@example.com');
       assert.equal(email.from, 'you@example.com');
       assert.match(email.subject, /First purchase received/);
       assert.equal(email.event, 'firstPurchase');

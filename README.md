@@ -228,7 +228,7 @@ NOTIFICATION_WEBHOOK_URL=https://your-hook.example/notify
 NOTIFICATION_TRANSPORT=smtp
 NOTIFICATION_SMTP_URL=https://api.example.com/v3/mail/send
 NOTIFICATION_FROM=you@example.com
-NOTIFICATION_TO=andrew.peal12@gmail.com
+NOTIFICATION_TO=owner@example.com
 ```
 
 Status is exposed at `GET /api/notifications` (token-guarded).
